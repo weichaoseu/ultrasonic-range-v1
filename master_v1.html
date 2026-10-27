@@ -47,6 +47,9 @@
     <span id="calState">未校准</span>
   </div>
   <div class="row">
+    <button id="selfTestBtn" disabled>自测（本机能否收发该频段）</button>
+  </div>
+  <div class="row">
     <label>声速 m/s</label>
     <input type="number" id="soundSpeed" value="343" min="300" max="400" step="1">
   </div>
@@ -149,17 +152,19 @@ function findPeak(env, chirpLen){
 // ===== 状态 =====
 let audioCtx = null, micStream = null, processor = null, connected = false;
 let buf = new Float32Array(0), bufStartTime = 0;
-let upChirp, downChirp, downRef;
+let upChirp, downChirp, upRef, downRef;
 let state = 'idle';            // idle | awaiting
 let t0 = 0, deadline = 0;
 let pendingCalib = false;      // 本次测量是否为校准
 let calibRTT = null;           // 零距离校准的往返时间（秒）
 let results = [];              // 每次点击收集的多次 RTT
 const TARGET_COUNT = 3;        // 每次点击测几次，取中位数抗抖动
+let deafUntil = 0;             // 失聪窗口：发送上行 chirp 后短暂忽略自己麦克风
 
 function initRefs(){
   upChirp = makeChirp(CHIRP_F0, CHIRP_F1, CHIRP_MS, SAMPLE_RATE);
   downChirp = makeChirp(CHIRP_F1, CHIRP_F0, CHIRP_MS, SAMPLE_RATE);
+  upRef = makeRefFFT(upChirp);
   downRef = makeRefFFT(downChirp);
 }
 
@@ -182,19 +187,22 @@ async function connect(){
   connBtn.textContent = '已连接'; connBtn.disabled = true;
   measureBtn.disabled = false;
   calBtn.disabled = false;
-  distLine.textContent = '已连接，可测距';
+  selfTestBtn.disabled = false;
+  distLine.textContent = '已连接，先点「自测」验证频段';
 }
 
 function onAudio(e){
   const data = e.inputBuffer.getChannelData(0);
   const t = e.playbackTime;
+  if (state === 'awaiting' && audioCtx.currentTime < deafUntil) return;   // 失聪窗口
   if (buf.length === 0) bufStartTime = t;
   const tmp = new Float32Array(buf.length + data.length);
   tmp.set(buf); tmp.set(data, buf.length);
   buf = tmp;
   const maxLen = N_FFT * 2;
   if (buf.length > maxLen){ const drop = buf.length - maxLen; buf = buf.slice(drop); bufStartTime += drop / SAMPLE_RATE; }
-  if (state === 'awaiting') handleAwait();
+  if (selfTestActive) handleSelfTest();
+  else if (state === 'awaiting') handleAwait();
 }
 
 function playChirp(chirpReal, when){
@@ -239,6 +247,7 @@ function doOneMeasure(){
   buf = new Float32Array(0); bufStartTime = 0;
   t0 = audioCtx.currentTime + 0.02;
   playChirp(upChirp.re, t0);
+  deafUntil = t0 + 0.12;   // 忽略 30ms chirp + 回声余量
   state = 'awaiting';
   deadline = t0 + 2.0;
   distLine.textContent = (pendingCalib ? '校准中' : '测量中') + ' ' + (results.length + 1) + '/' + TARGET_COUNT + '…';
@@ -289,6 +298,30 @@ function finish(){
   }
 }
 
+// ===== 自测（本机回环，验证能否收发当前频段）=====
+let selfTestActive = false, selfTestDeadline = 0;
+
+function selfTest(){
+  if (!connected || state === 'awaiting') return;
+  buf = new Float32Array(0); bufStartTime = 0;
+  const t = audioCtx.currentTime + 0.02;
+  playChirp(upChirp.re, t);
+  selfTestActive = true;
+  selfTestDeadline = t + 1.5;
+  distLine.textContent = '自测中：播放 chirp 并回听…';
+}
+
+function handleSelfTest(){
+  const t1 = detectChirp(upRef, upChirp.length);
+  if (t1 !== null){
+    selfTestActive = false;
+    distLine.textContent = '自测通过 ✓ 本机能收发 ' + (CHIRP_F0/1000) + '~' + (CHIRP_F1/1000) + ' kHz';
+  } else if (audioCtx.currentTime > selfTestDeadline){
+    selfTestActive = false;
+    distLine.textContent = '自测失败 ✗ 本机无法收发该频段（扬声器或麦克风不支持），换频段再试';
+  }
+}
+
 // ===== UI =====
 const connDot = document.getElementById('connDot');
 const connBtn = document.getElementById('connBtn');
@@ -298,12 +331,14 @@ const measureBtn = document.getElementById('measureBtn');
 const calBtn = document.getElementById('calBtn');
 const calState = document.getElementById('calState');
 const soundSpeed = document.getElementById('soundSpeed');
+const selfTestBtn = document.getElementById('selfTestBtn');
 
 connBtn.addEventListener('click', () => {
   connect().catch(e => { distLine.textContent = '连接失败：' + e.message + '（需 HTTPS/localhost）'; });
 });
 measureBtn.addEventListener('click', () => measure(false));
 calBtn.addEventListener('click', () => measure(true));
+selfTestBtn.addEventListener('click', () => selfTest());
 </script>
 </body>
 </html>
