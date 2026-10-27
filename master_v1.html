@@ -39,7 +39,7 @@
 </header>
 
 <main>
-  <div id="dist">---<span class="unit">m</span></div>
+  <div id="dist"><span id="distVal">---</span><span class="unit">m</span></div>
   <div id="distLine">未测量</div>
   <button id="measureBtn" disabled>测距</button>
   <div class="row">
@@ -274,7 +274,7 @@ function handleAwait(){
     state = 'idle';
     measureBtn.disabled = false;
     calBtn.disabled = false;
-    dist.textContent = '---';
+    setDist('---', 'm');
     distLine.textContent = '第 ' + (results.length + 1) + ' 次超时（未收到应答）';
   }
 }
@@ -282,7 +282,7 @@ function handleAwait(){
 function finish(){
   measureBtn.disabled = false;
   calBtn.disabled = false;
-  if (results.length === 0){ dist.textContent = '---'; distLine.textContent = '测量失败'; return; }
+  if (results.length === 0){ setDist('---', 'm'); distLine.textContent = '测量失败'; return; }
   const sorted = results.slice().sort((a, b) => a - b);
   const rtt = sorted[Math.floor(sorted.length / 2)];   // 中位数
   const isCalib = pendingCalib;
@@ -291,15 +291,14 @@ function finish(){
     calibRTT = rtt;
     calState.textContent = '已校准';
     calState.className = 'ok';
-    dist.textContent = '0.00';
-    dist.querySelector('.unit').textContent = 'm';
+    setDist('0.00', 'm');
     distLine.textContent = '校准完成（往返 ' + (rtt * 1000).toFixed(1) + ' ms）';
   } else {
     const c = parseFloat(soundSpeed.value) || 343;
     const d = calibRTT !== null ? (rtt - calibRTT) / 2 * c : rtt / 2 * c;
-    if (d < 0.01){ dist.textContent = '0.00'; dist.querySelector('.unit').textContent = 'm'; }
-    else if (d < 1){ dist.textContent = (d * 100).toFixed(0); dist.querySelector('.unit').textContent = 'cm'; }
-    else { dist.textContent = d.toFixed(2); dist.querySelector('.unit').textContent = 'm'; }
+    if (d < 0.01){ setDist('0.00', 'm'); }
+    else if (d < 1){ setDist((d * 100).toFixed(0), 'cm'); }
+    else { setDist(d.toFixed(2), 'm'); }
     distLine.textContent = (calibRTT === null ? '未校准（数值含固定偏移）' : '往返 ' + (rtt * 1000).toFixed(1) + ' ms · ' + results.length + ' 次中位数');
   }
 }
@@ -332,12 +331,19 @@ function handleSelfTest(){
 const connDot = document.getElementById('connDot');
 const connBtn = document.getElementById('connBtn');
 const dist = document.getElementById('dist');
+const distVal = document.getElementById('distVal');
+const unitEl = dist.querySelector('.unit');
 const distLine = document.getElementById('distLine');
 const measureBtn = document.getElementById('measureBtn');
 const calBtn = document.getElementById('calBtn');
 const calState = document.getElementById('calState');
 const soundSpeed = document.getElementById('soundSpeed');
 const selfTestBtn = document.getElementById('selfTestBtn');
+
+function setDist(text, unit){
+  distVal.textContent = text;
+  unitEl.textContent = unit || 'm';
+}
 
 connBtn.addEventListener('click', () => {
   connect().catch(e => { distLine.textContent = '连接失败：' + e.message + '（需 HTTPS/localhost）'; });
