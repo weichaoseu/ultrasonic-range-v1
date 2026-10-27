@@ -1,0 +1,234 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, user-scalable=no">
+<title>声波测距 · 应答端</title>
+<style>
+  :root{ --bg:#0f1420; --panel:#1a2233; --line:#2a3448; --txt:#e6edf7; --dim:#8a97ad; --acc:#3fb6ff; --ok:#3fd68f; --warn:#ffb454; }
+  *{ box-sizing:border-box; }
+  html,body{ height:100%; }
+  body{ margin:0; font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,"PingFang SC","Microsoft YaHei",sans-serif; background:var(--bg); color:var(--txt); display:flex; flex-direction:column; }
+  header{ padding:12px 16px; border-bottom:1px solid var(--line); background:var(--panel); display:flex; align-items:center; gap:10px; }
+  .dot{ width:9px; height:9px; border-radius:50%; background:#5a6577; flex:none; }
+  .dot.on{ background:var(--ok); box-shadow:0 0 6px var(--ok); }
+  h1{ font-size:16px; margin:0; flex:1; font-weight:600; }
+  #connBtn{ background:var(--acc); color:#04121f; border:none; border-radius:7px; padding:7px 14px; font-size:13px; font-weight:600; cursor:pointer; }
+  #connBtn:disabled{ opacity:.5; cursor:default; }
+  main{ flex:1; display:flex; flex-direction:column; align-items:center; justify-content:center; gap:20px; padding:20px; }
+  #big{ font-size:28px; font-weight:700; }
+  #status{ font-size:15px; color:var(--dim); }
+  #flash{ width:140px; height:140px; border-radius:50%; background:#1a2233; border:3px solid var(--line); display:flex; align-items:center; justify-content:center; transition:background .15s; }
+  #flash.on{ background:#1d3a2a; border-color:var(--ok); }
+  .hint{ font-size:12px; color:var(--dim); text-align:center; max-width:340px; line-height:1.6; }
+</style>
+</head>
+<body>
+<header>
+  <span class="dot" id="connDot"></span>
+  <h1>📡 声波测距 · 应答端</h1>
+  <button id="connBtn">连接</button>
+</header>
+
+<main>
+  <div id="flash">待机</div>
+  <div id="big">等待测距信号…</div>
+  <div id="status">未连接</div>
+  <div class="hint">本页打开后自动应答，无需操作。<br>测距端（master.html）发来 chirp 后，本机会回一个 chirp。</div>
+</main>
+
+<script>
+"use strict";
+// ===== 常量 =====
+const CHIRP_F0 = 15000, CHIRP_F1 = 18000;  // 近超声 15-18kHz（抗环境噪声）；两端必须一致，可闻版用 4000/10000
+const CHIRP_MS = 30;
+const N_FFT = 16384;
+const TURNAROUND_MS = 300;    // 检测到信号后固定延迟这么久再应答
+let SAMPLE_RATE = 48000;
+
+// ===== DSP 核心（与 master 一致）=====
+function makeChirp(f0, f1, ms, sr){
+  const n = Math.round(ms / 1000 * sr);
+  const re = new Float32Array(n), im = new Float32Array(n);
+  const T = n / sr;
+  for (let i = 0; i < n; i++){
+    const t = i / sr;
+    const phi = 2 * Math.PI * (f0 * t + (f1 - f0) / (2 * T) * t * t);
+    const w = 0.5 * (1 - Math.cos(2 * Math.PI * i / (n - 1)));
+    re[i] = Math.sin(phi) * w;
+    im[i] = Math.cos(phi) * w;
+  }
+  return { re, im, length: n };
+}
+function fft(re, im){
+  const n = re.length;
+  for (let i = 1, j = 0; i < n; i++){
+    let bit = n >> 1;
+    for (; j & bit; bit >>= 1) j ^= bit;
+    j ^= bit;
+    if (i < j){ let t = re[i]; re[i] = re[j]; re[j] = t; t = im[i]; im[i] = im[j]; im[j] = t; }
+  }
+  for (let len = 2; len <= n; len <<= 1){
+    const ang = -2 * Math.PI / len, wr = Math.cos(ang), wi = Math.sin(ang);
+    for (let i = 0; i < n; i += len){
+      let cr = 1, ci = 0;
+      for (let j = 0; j < (len >> 1); j++){
+        const a = i + j, b = i + j + (len >> 1);
+        const tr = re[b] * cr - im[b] * ci, ti = re[b] * ci + im[b] * cr;
+        re[b] = re[a] - tr; im[b] = im[a] - ti; re[a] += tr; im[a] += ti;
+        const nr = cr * wr - ci * wi; ci = cr * wi + ci * wr; cr = nr;
+      }
+    }
+  }
+}
+function ifft(re, im){
+  const n = re.length;
+  for (let i = 0; i < n; i++) im[i] = -im[i];
+  fft(re, im);
+  for (let i = 0; i < n; i++){ im[i] = -im[i]; re[i] /= n; im[i] /= n; }
+}
+function makeRefFFT(chirp){
+  const re = new Float32Array(N_FFT), im = new Float32Array(N_FFT);
+  for (let i = 0; i < chirp.length; i++){ re[i] = chirp.re[i]; im[i] = chirp.im[i]; }
+  fft(re, im);
+  return { re, im };
+}
+function matchedFilterEnv(buf, refRe, refIm){
+  const n = buf.length;
+  const re = new Float32Array(n), im = new Float32Array(n);
+  for (let i = 0; i < n; i++) re[i] = buf[i];
+  fft(re, im);
+  for (let i = 0; i < n; i++){
+    const a = re[i], b = im[i];
+    re[i] = a * refRe[i] + b * refIm[i];
+    im[i] = b * refRe[i] - a * refIm[i];
+  }
+  ifft(re, im);
+  const env = new Float32Array(n);
+  for (let i = 0; i < n; i++) env[i] = Math.sqrt(re[i] * re[i] + im[i] * im[i]);
+  return env;
+}
+function findPeak(env, chirpLen){
+  const n = env.length;
+  let ymax = 0;
+  for (let i = 0; i < n - chirpLen; i++) if (env[i] > ymax) ymax = env[i];
+  if (ymax <= 0) return null;
+  const thr = ymax * 0.4;
+  for (let i = 1; i < n - chirpLen - 1; i++){
+    if (env[i] > thr && env[i] >= env[i - 1] && env[i] >= env[i + 1]){
+      let delta = 0;
+      const a = env[i - 1], b = env[i], c = env[i + 1];
+      const denom = a - 2 * b + c;
+      if (denom !== 0){
+        delta = 0.5 * (a - c) / denom;
+        if (delta > 0.5) delta = 0.5;
+        if (delta < -0.5) delta = -0.5;
+      }
+      return { pos: i + delta, value: env[i] };
+    }
+  }
+  return null;
+}
+
+// ===== 状态 =====
+let audioCtx = null, micStream = null, processor = null, connected = false;
+let buf = new Float32Array(0), bufStartTime = 0;
+let upChirp, downChirp, upRef;
+let lastTriggerTime = -Infinity;
+
+function initRefs(){
+  upChirp = makeChirp(CHIRP_F0, CHIRP_F1, CHIRP_MS, SAMPLE_RATE);
+  downChirp = makeChirp(CHIRP_F1, CHIRP_F0, CHIRP_MS, SAMPLE_RATE);
+  upRef = makeRefFFT(upChirp);
+}
+
+// ===== 音频 =====
+async function connect(){
+  audioCtx = new (window.AudioContext || window.webkitAudioContext)({ sampleRate: 48000 });
+  SAMPLE_RATE = audioCtx.sampleRate;
+  initRefs();
+  await audioCtx.resume();
+  micStream = await navigator.mediaDevices.getUserMedia({
+    audio: { echoCancellation:false, noiseSuppression:false, autoGainControl:false }
+  });
+  const src = audioCtx.createMediaStreamSource(micStream);
+  processor = audioCtx.createScriptProcessor(4096, 1, 1);
+  const mute = audioCtx.createGain(); mute.gain.value = 0;
+  src.connect(processor); processor.connect(mute); mute.connect(audioCtx.destination);
+  processor.onaudioprocess = onAudio;
+  connected = true;
+  connDot.classList.add('on');
+  connBtn.textContent = '已连接'; connBtn.disabled = true;
+  statusEl.textContent = '已连接，等待测距信号…';
+}
+
+function onAudio(e){
+  const data = e.inputBuffer.getChannelData(0);
+  const t = e.playbackTime;
+  if (buf.length === 0) bufStartTime = t;
+  const tmp = new Float32Array(buf.length + data.length);
+  tmp.set(buf); tmp.set(data, buf.length);
+  buf = tmp;
+  const maxLen = N_FFT * 2;
+  if (buf.length > maxLen){ const drop = buf.length - maxLen; buf = buf.slice(drop); bufStartTime += drop / SAMPLE_RATE; }
+
+  // 冷却：避免对同一 chirp / 回声重复应答
+  if (audioCtx.currentTime - lastTriggerTime < 1.0) return;
+
+  const t1 = detectChirp(upRef, upChirp.length);
+  if (t1 !== null){
+    lastTriggerTime = audioCtx.currentTime;
+    const replyTime = Math.max(t1 + TURNAROUND_MS / 1000, audioCtx.currentTime + 0.01);
+    playChirp(downChirp.re, replyTime);
+    flash();
+  }
+}
+
+function playChirp(chirpReal, when){
+  const b = audioCtx.createBuffer(1, chirpReal.length, SAMPLE_RATE);
+  b.getChannelData(0).set(chirpReal);
+  const src = audioCtx.createBufferSource(); src.buffer = b;
+  const g = audioCtx.createGain(); g.gain.value = 1.0;
+  src.connect(g); g.connect(audioCtx.destination);
+  src.start(when);
+}
+
+function detectChirp(ref, chirpLen){
+  if (buf.length < chirpLen) return null;
+  const win = new Float32Array(N_FFT);
+  const start = Math.max(0, buf.length - N_FFT);
+  const len = buf.length - start;
+  win.set(buf.subarray(start), 0);
+  const winStartTime = bufStartTime + start / SAMPLE_RATE;
+  const env = matchedFilterEnv(win, ref.re, ref.im);
+  let mean = 0;
+  for (let i = 0; i < env.length; i++) mean += env[i];
+  mean /= env.length;
+  const peak = findPeak(env, chirpLen);
+  if (peak && peak.value > mean * 6){
+    return winStartTime + peak.pos / SAMPLE_RATE;
+  }
+  return null;
+}
+
+// ===== UI =====
+const connDot = document.getElementById('connDot');
+const connBtn = document.getElementById('connBtn');
+const statusEl = document.getElementById('status');
+const flashEl = document.getElementById('flash');
+const bigEl = document.getElementById('big');
+
+function flash(){
+  flashEl.classList.add('on');
+  flashEl.textContent = '应答';
+  bigEl.textContent = '收到信号，正在应答…';
+  statusEl.textContent = '已应答一次';
+  setTimeout(() => { flashEl.classList.remove('on'); flashEl.textContent = '待机'; }, 400);
+}
+
+connBtn.addEventListener('click', () => {
+  connect().catch(e => { statusEl.textContent = '连接失败：' + e.message + '（需 HTTPS/localhost）'; });
+});
+</script>
+</body>
+</html>
