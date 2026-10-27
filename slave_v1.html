@@ -134,13 +134,15 @@ function findPeak(env, chirpLen){
 // ===== 状态 =====
 let audioCtx = null, micStream = null, processor = null, connected = false;
 let buf = new Float32Array(0), bufStartTime = 0;
-let upChirp, downChirp, upRef;
+let upChirp, downChirp, upRef, refEnergy = 0;
 let lastTriggerTime = -Infinity;
 
 function initRefs(){
   upChirp = makeChirp(CHIRP_F0, CHIRP_F1, CHIRP_MS, SAMPLE_RATE);
   downChirp = makeChirp(CHIRP_F1, CHIRP_F0, CHIRP_MS, SAMPLE_RATE);
   upRef = makeRefFFT(upChirp);
+  refEnergy = 0;
+  for (let i = 0; i < upChirp.length; i++) refEnergy += upChirp.re[i]*upChirp.re[i] + upChirp.im[i]*upChirp.im[i];
 }
 
 // ===== 音频 =====
@@ -205,14 +207,18 @@ function detectChirp(ref, chirpLen){
   win.set(buf.subarray(start), 0);
   const winStartTime = bufStartTime + start / SAMPLE_RATE;
   const env = matchedFilterEnv(win, ref.re, ref.im);
-  let mean = 0;
-  for (let i = 0; i < env.length; i++) mean += env[i];
-  mean /= env.length;
   const peak = findPeak(env, chirpLen);
-  if (peak && peak.value > mean * 6){
-    return winStartTime + peak.pos / SAMPLE_RATE;
+  if (!peak) return null;
+  // 归一化相关：真实 chirp ≈0.707（与音量无关），人声/宽带噪声远小于 0.35
+  const p = Math.round(peak.pos);
+  let sigE = 0;
+  for (let k = 0; k < chirpLen; k++){
+    const s = (p + k < N_FFT) ? win[p + k] : 0;
+    sigE += s * s;
   }
-  return null;
+  const corrNorm = sigE > 0 ? peak.value / Math.sqrt(sigE * refEnergy) : 0;
+  if (corrNorm < 0.35) return null;
+  return winStartTime + peak.pos / SAMPLE_RATE;
 }
 
 // ===== 自测（本机回环，验证能否收发当前频段）=====
