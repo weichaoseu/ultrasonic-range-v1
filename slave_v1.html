@@ -41,7 +41,7 @@
 <script>
 "use strict";
 // ===== 常量 =====
-const CHIRP_F0 = 15000, CHIRP_F1 = 18000;  // 近超声 15-18kHz（抗环境噪声）；两端必须一致，可闻版用 4000/10000
+const CHIRP_F0 = 4000, CHIRP_F1 = 10000;   // 可闻 4-10kHz（扬声器输出最强，测距最远）；两端必须一致
 const CHIRP_MS = 30;
 const N_FFT = 16384;
 const TURNAROUND_MS = 300;    // 检测到信号后固定延迟这么久再应答
